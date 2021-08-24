@@ -17,6 +17,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -135,8 +136,14 @@ func main() {
 			dur, _ := time.ParseDuration("0")
 			q := 0.0
 
-			s := strings.Split(line, " ")
-			for i := 0; i <= len(s); i++ {
+			s, err := parseCommandLine(line)
+			if err != nil {
+				fmt.Printf("Error parsing from file: %e", err)
+			}
+
+			fmt.Printf("Command line: %v\n", s)
+
+			for i := 0; i < len(s); i++ {
 				if s[i] == "-c" {
 					conc, _ = strconv.Atoi(s[i+1])
 				}
@@ -152,8 +159,12 @@ func main() {
 				if s[i] == "-H" {
 					hs = append(hs, s[i+1])
 				}
-				go loadTestingProcess(num, conc, q, dur, hs)
 			}
+
+			fmt.Printf("Number of requests: %d\n", num)
+			fmt.Printf("Concurrency: %d\n", conc)
+			fmt.Printf("URL: %s\n", s[len(s)-1])
+			loadTestingProcess(num, conc, q, dur, hs, s[len(s)-1])
 		}
 	} else {
 		var hs headerSlice
@@ -168,11 +179,78 @@ func main() {
 		conc := *c
 		q := *q
 		dur := *z
-		loadTestingProcess(num, conc, q, dur, hs)
+		url := flag.Args()[0]
+
+		loadTestingProcess(num, conc, q, dur, hs, url)
 	}
 }
 
-func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs headerSlice) {
+func parseCommandLine(command string) ([]string, error) {
+	var args []string
+	state := "start"
+	current := ""
+	quote := "\""
+	escapeNext := true
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+
+		if state == "quotes" {
+			if string(c) != quote {
+				current += string(c)
+			} else {
+				args = append(args, current)
+				current = ""
+				state = "start"
+			}
+			continue
+		}
+
+		if (escapeNext) {
+			current += string(c)
+			escapeNext = false
+			continue
+		}
+
+		if (c == '\\') {
+			escapeNext = true
+			continue
+		}
+
+		if c == '"' || c == '\'' {
+			state = "quotes"
+			quote = string(c)
+			continue
+		}
+
+		if state == "arg" {
+			if c == ' ' || c == '\t' {
+				args = append(args, current)
+				current = ""
+				state = "start"
+			} else {
+				current += string(c)
+			}
+			continue
+		}
+
+		if c != ' ' && c != '\t' {
+			state = "arg"
+			current += string(c)
+		}
+	}
+
+	if state == "quotes" {
+		return []string{}, errors.New(fmt.Sprintf("Unclosed quote in command line: %s", command))
+	}
+
+	if current != "" {
+		args = append(args, current)
+	}
+
+	return args, nil
+}
+
+func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs headerSlice, url string) {
 	if dur > 0 {
 		num = math.MaxInt32
 		if conc <= 0 {
@@ -188,7 +266,6 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		}
 	}
 
-	url := flag.Args()[0]
 	method := strings.ToUpper(*m)
 
 	// set content-type
