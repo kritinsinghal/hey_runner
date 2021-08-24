@@ -16,10 +16,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"math"
+	"math/rand"
 	"net/http"
 	gourl "net/url"
 	"os"
@@ -37,6 +40,10 @@ const (
 	authRegexp   = `^(.+):([^\s].+)`
 	heyUA        = "hey/0.0.1"
 )
+
+var generatorValues []string
+var req *http.Request
+var bodyAll []byte
 
 var (
 	m           = flag.String("m", "GET", "")
@@ -56,6 +63,11 @@ var (
 	q = flag.Float64("q", 0, "")
 	t = flag.Int("t", 20, "")
 	z = flag.Duration("z", 0, "")
+
+	// File Format:
+	// Basic cjkdicsnodjk==
+	// Bearer jkdjflskldklskhjg
+	genOpts = flag.String("g", "", "")
 
 	h2   = flag.Bool("h2", false, "")
 	cpus = flag.Int("cpus", runtime.GOMAXPROCS(-1), "")
@@ -170,7 +182,6 @@ func main() {
 		username, password = match[1], match[2]
 	}
 
-	var bodyAll []byte
 	if *body != "" {
 		bodyAll = []byte(*body)
 	}
@@ -182,6 +193,26 @@ func main() {
 		bodyAll = slurp
 	}
 
+	// Read the file into generatorValues
+	var RequestFunc func() *http.Request = nil
+	if *genOpts != "" {
+		file, err := os.Open(*genOpts)
+		if err != nil {
+			errAndExit(err.Error())
+		}
+
+		scanner := bufio.NewScanner(file)
+		scanner.Split(bufio.ScanLines)
+
+		for scanner.Scan() {
+			generatorValues = append(generatorValues, scanner.Text())
+		}
+
+		file.Close()
+
+		RequestFunc = generator
+	}
+
 	var proxyURL *gourl.URL
 	if *proxyAddr != "" {
 		var err error
@@ -191,7 +222,8 @@ func main() {
 		}
 	}
 
-	req, err := http.NewRequest(method, url, nil)
+	var err error
+	req, err = http.NewRequest(method, url, nil)
 	if err != nil {
 		usageAndExit(err.Error())
 	}
@@ -226,6 +258,7 @@ func main() {
 		RequestBody:        bodyAll,
 		N:                  num,
 		C:                  conc,
+		RequestFunc: 		RequestFunc,
 		QPS:                q,
 		Timeout:            *t,
 		DisableCompression: *disableCompression,
@@ -250,6 +283,29 @@ func main() {
 		}()
 	}
 	w.Run()
+}
+
+func generator() *http.Request {
+	// Do what cloneRequest does in requestor.go, but add an extra
+	// Authorization header based on the file you read into generatorValues
+	r2 := new(http.Request)
+	*r2 = *req
+	r2.Header = make(http.Header, len(req.Header) + 1)
+	for k, s := range req.Header {
+		r2.Header[k] = append([]string(nil), s...)
+	}
+
+	token := generatorValues[rand.Intn(len(generatorValues))]
+	var tokenArr []string
+	tokenArr = append(tokenArr, token)
+
+	r2.Header["Authorization"] = append([]string(nil), tokenArr...)
+
+	if len(bodyAll) > 0 {
+		r2.Body = ioutil.NopCloser(bytes.NewReader(bodyAll))
+	}
+
+	return r2
 }
 
 func errAndExit(msg string) {
