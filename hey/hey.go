@@ -17,19 +17,18 @@ package main
 
 import (
 	"bufio"
-	"errors"
+	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	gourl "net/url"
 	"os"
 	"os/signal"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +40,10 @@ const (
 	authRegexp   = `^(.+):([^\s].+)`
 	heyUA        = "hey/0.0.1"
 )
+
+var generatorValues []string
+var req *http.Request
+var bodyAll []byte
 
 var (
 	m           = flag.String("m", "GET", "")
@@ -56,11 +59,15 @@ var (
 	output = flag.String("o", "", "")
 
 	c = flag.Int("c", 50, "")
-	f = flag.String("f", "", "")
 	n = flag.Int("n", 200, "")
 	q = flag.Float64("q", 0, "")
 	t = flag.Int("t", 20, "")
 	z = flag.Duration("z", 0, "")
+
+	// File Format:
+	// Basic cjkdicsnodjk==
+	// Bearer jkdjflskldklskhjg
+	genOpts = flag.String("g", "", "")
 
 	h2   = flag.Bool("h2", false, "")
 	cpus = flag.Int("cpus", runtime.GOMAXPROCS(-1), "")
@@ -113,144 +120,20 @@ func main() {
 		fmt.Fprint(os.Stderr, fmt.Sprintf(usage, runtime.NumCPU()))
 	}
 
+	var hs headerSlice
+	flag.Var(&hs, "H", "")
+
 	flag.Parse()
-
-	if *f != "" {
-		file, err := os.Open(*f)
-		if err != nil {
-			log.Fatalf("failed to open")
-		}
-		scanner := bufio.NewScanner(file)
-		scanner.Split(bufio.ScanLines)
-		var text []string
-
-		for scanner.Scan() {
-			text = append(text, scanner.Text())
-		}
-		file.Close()
-
-		for _, line := range text {
-			var hs headerSlice
-			num := 200
-			conc := 50
-			dur, _ := time.ParseDuration("0")
-			q := 0.0
-
-			s, err := parseCommandLine(line)
-			if err != nil {
-				fmt.Printf("Error parsing from file: %e", err)
-			}
-
-			fmt.Printf("Command line: %v\n", s)
-
-			for i := 0; i < len(s); i++ {
-				if s[i] == "-c" {
-					conc, _ = strconv.Atoi(s[i+1])
-				}
-				if s[i] == "-n" {
-					num, _ = strconv.Atoi(s[i+1])
-				}
-				if s[i] == "-q" {
-					q, _ = strconv.ParseFloat(s[i+1], 64)
-				}
-				if s[i] == "-z" {
-					dur, _ = time.ParseDuration(s[i+1])
-				}
-				if s[i] == "-H" {
-					hs = append(hs, s[i+1])
-				}
-			}
-
-			fmt.Printf("Number of requests: %d\n", num)
-			fmt.Printf("Concurrency: %d\n", conc)
-			fmt.Printf("URL: %s\n", s[len(s)-1])
-			loadTestingProcess(num, conc, q, dur, hs, s[len(s)-1])
-		}
-	} else {
-		var hs headerSlice
-		flag.Var(&hs, "H", "")
-
-		if flag.NArg() < 1 {
-			usageAndExit("")
-		}
-
-		runtime.GOMAXPROCS(*cpus)
-		num := *n
-		conc := *c
-		q := *q
-		dur := *z
-		url := flag.Args()[0]
-
-		loadTestingProcess(num, conc, q, dur, hs, url)
-	}
-}
-
-func parseCommandLine(command string) ([]string, error) {
-	var args []string
-	state := "start"
-	current := ""
-	quote := "\""
-	escapeNext := true
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-
-		if state == "quotes" {
-			if string(c) != quote {
-				current += string(c)
-			} else {
-				args = append(args, current)
-				current = ""
-				state = "start"
-			}
-			continue
-		}
-
-		if (escapeNext) {
-			current += string(c)
-			escapeNext = false
-			continue
-		}
-
-		if (c == '\\') {
-			escapeNext = true
-			continue
-		}
-
-		if c == '"' || c == '\'' {
-			state = "quotes"
-			quote = string(c)
-			continue
-		}
-
-		if state == "arg" {
-			if c == ' ' || c == '\t' {
-				args = append(args, current)
-				current = ""
-				state = "start"
-			} else {
-				current += string(c)
-			}
-			continue
-		}
-
-		if c != ' ' && c != '\t' {
-			state = "arg"
-			current += string(c)
-		}
+	if flag.NArg() < 1 {
+		usageAndExit("")
 	}
 
-	if state == "quotes" {
-		return []string{}, errors.New(fmt.Sprintf("Unclosed quote in command line: %s", command))
-	}
+	runtime.GOMAXPROCS(*cpus)
+	num := *n
+	conc := *c
+	q := *q
+	dur := *z
 
-	if current != "" {
-		args = append(args, current)
-	}
-
-	return args, nil
-}
-
-func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs headerSlice, url string) {
 	if dur > 0 {
 		num = math.MaxInt32
 		if conc <= 0 {
@@ -266,6 +149,7 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		}
 	}
 
+	url := flag.Args()[0]
 	method := strings.ToUpper(*m)
 
 	// set content-type
@@ -298,7 +182,6 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		username, password = match[1], match[2]
 	}
 
-	var bodyAll []byte
 	if *body != "" {
 		bodyAll = []byte(*body)
 	}
@@ -310,6 +193,26 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		bodyAll = slurp
 	}
 
+	// Read the file into generatorValues
+	var RequestFunc func() *http.Request = nil
+	if *genOpts != "" {
+		file, err := os.Open(*genOpts)
+		if err != nil {
+			errAndExit(err.Error())
+		}
+
+		scanner := bufio.NewScanner(file)
+		scanner.Split(bufio.ScanLines)
+
+		for scanner.Scan() {
+			generatorValues = append(generatorValues, scanner.Text())
+		}
+
+		file.Close()
+
+		RequestFunc = generator
+	}
+
 	var proxyURL *gourl.URL
 	if *proxyAddr != "" {
 		var err error
@@ -319,7 +222,8 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		}
 	}
 
-	req, err := http.NewRequest(method, url, nil)
+	var err error
+	req, err = http.NewRequest(method, url, nil)
 	if err != nil {
 		usageAndExit(err.Error())
 	}
@@ -354,6 +258,7 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		RequestBody:        bodyAll,
 		N:                  num,
 		C:                  conc,
+		RequestFunc: 		RequestFunc,
 		QPS:                q,
 		Timeout:            *t,
 		DisableCompression: *disableCompression,
@@ -378,6 +283,29 @@ func loadTestingProcess(num int, conc int, q float64, dur time.Duration, hs head
 		}()
 	}
 	w.Run()
+}
+
+func generator() *http.Request {
+	// Do what cloneRequest does in requestor.go, but add an extra
+	// Authorization header based on the file you read into generatorValues
+	r2 := new(http.Request)
+	*r2 = *req
+	r2.Header = make(http.Header, len(req.Header) + 1)
+	for k, s := range req.Header {
+		r2.Header[k] = append([]string(nil), s...)
+	}
+
+	token := generatorValues[rand.Intn(len(generatorValues))]
+	var tokenArr []string
+	tokenArr = append(tokenArr, token)
+
+	r2.Header["Authorization"] = append([]string(nil), tokenArr...)
+
+	if len(bodyAll) > 0 {
+		r2.Body = ioutil.NopCloser(bytes.NewReader(bodyAll))
+	}
+
+	return r2
 }
 
 func errAndExit(msg string) {
